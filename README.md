@@ -137,10 +137,12 @@ streamlit run app.py
 
 | 时机 | 行为 |
 |---|---|
-| 首次检测 | `models/` 无权重时，ultralytics 自动下载 `yolo11n.pt` 并回写到 `models/`，需要联网 |
+| 首次检测 | `models/` 无权重时，ultralytics 自动下载 `yolo11n.pt` 并**自动复制回 `models/` 目录**作为本地缓存，仅首次需要联网 |
 | 首次检测 | 自动创建 `data/detections.db` 并建表建索引 |
 | 触发告警 | 自动创建 `snapshots/YYYY-MM-DD/`，写入快照（需勾选「自动保存快照」） |
 | 启动应用 | 创建 `logs/app_YYYYMMDD.log` |
+
+> 想跳过下载：把任意 `.pt`（或 ONNX）权重放进 `models/` 并命名为 `yolo11n.pt` 即可。
 
 ---
 
@@ -253,6 +255,7 @@ VACUUM;
 | 数据分析页空白 | `data/detections.db` 还没有数据，先去「实时检测」页跑一段 |
 | 日志在哪 | `logs/app_YYYYMMDD.log`，同时输出到启动 `streamlit` 的终端 |
 | 快照保存失败 | 已修复：`cv2.imwrite` 在路径含中文时会**静默失败**（返回 `False` 且不建文件）。`backend/utils.py::imwrite_unicode()` 改为先 `imencode` 到内存再用 Python `open()` 落盘，兼容任意 Unicode 路径 |
+| 模型每次都重新下载 | 已修复：权重缓存目录原先写死 Linux 的 `~/.cache/ultralytics`，Windows 等平台定位不到下载产物，导致缓存回写静默失效。现按「ultralytics settings → 平台路径 → CWD」多目录查找 |
 
 ---
 

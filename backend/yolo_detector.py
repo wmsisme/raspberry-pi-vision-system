@@ -118,32 +118,102 @@ class YOLODetector:
         self._model_loaded = False
         logger.error("所有模型加载方式均失败，目标检测功能不可用")
 
+    @staticmethod
+    def _cache_search_dirs() -> list:
+        """
+        收集 ultralytics 可能存放下载权重的候选目录（跨平台）
+
+        不能写死 ~/.cache/ultralytics —— 那是 Linux/macOS 的约定：
+          * Linux   : ~/.cache/ultralytics
+          * Windows : %APPDATA%\\Ultralytics  (settings['weights_dir'])
+          * 树莓派  : ~/.cache/ultralytics
+        另外 ultralytics 也可能把权重直接下到当时的 CWD。
+        故按「settings 声明的权重目录 → 平台兼容路径 → CWD」依次收集。
+        """
+        dirs = []
+
+        # 1) ultralytics 自己声明的权重目录（最权威，跨平台正确）
+        try:
+            from ultralytics import settings as ultra_settings
+            wd = ultra_settings.get("weights_dir")
+            if wd:
+                dirs.append(os.path.expanduser(wd))
+        except Exception:
+            pass
+
+        # 2) 平台兼容的常见缓存路径
+        home = os.path.expanduser("~")
+        dirs.append(os.path.join(home, ".cache", "ultralytics"))
+        dirs.append(os.path.join(home, ".cache", "ultralytics", "hub", "checkpoints"))
+        appdata = os.environ.get("APPDATA")
+        if appdata:  # Windows
+            dirs.append(os.path.join(appdata, "Ultralytics"))
+            dirs.append(os.path.join(appdata, "Ultralytics", "weights"))
+        dirs.append(os.path.join(home, "Library", "Caches", "ultralytics"))  # macOS
+        dirs.append(os.path.join(home, ".config", "Ultralytics"))            # Linux XDG
+        dirs.append(os.path.join(home, "Ultralytics"))
+
+        # 3) 当时的 CWD 与项目 models/ 平级目录
+        dirs.append(os.getcwd())
+        dirs.append(os.path.join(BASE_DIR, "models"))
+
+        # 去重 + 只保留真实存在的目录
+        seen, out = set(), []
+        for d in dirs:
+            d = os.path.abspath(d)
+            if d not in seen and os.path.isdir(d):
+                seen.add(d)
+                out.append(d)
+        return out
+
+    def _find_downloaded_weights(self) -> str:
+        """在候选目录中查找刚下载的权重文件，返回其真实路径（未找到返回空串）"""
+        targets = {YOLO_MODEL_NAME.lower(), f"{YOLO_MODEL_SHORT}.pt".lower()}
+        for cache_dir in self._cache_search_dirs():
+            if os.path.abspath(cache_dir) == os.path.abspath(os.path.dirname(self.model_path)):
+                continue  # 跳过目标目录本身
+            for root, _dirs, files in os.walk(cache_dir):
+                for f in files:
+                    if f.lower() in targets:
+                        return os.path.join(root, f)
+        return ""
+
     def _cache_downloaded_model(self) -> None:
         """
-        将 ultralytics 下载到缓存的模型复制到本地 models/ 目录
-        ultralytics 默认缓存路径: ~/.cache/ultralytics/hub/checkpoints/
+        把 ultralytics 自动下载的权重复制到本地 models/ 目录，并将
+        self.model_path 更新为**磁盘上真实存在**的路径。
+
+        重要: 只有在文件确实落盘后才更新 model_path —— 否则程序会对外
+        报告一个并不存在的路径（本函数早期版本就有这个问题）。
         """
         try:
-            cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "ultralytics")
-            if not os.path.exists(cache_dir):
+            # 已经就在目标位置，无需处理
+            if os.path.exists(self.model_path) and os.path.getsize(self.model_path) > 1000:
                 return
 
-            # 递归查找缓存中的 .pt 文件
-            for root, dirs, files in os.walk(cache_dir):
-                for f in files:
-                    if f.lower() == YOLO_MODEL_NAME.lower() or f == f"{YOLO_MODEL_SHORT}.pt":
-                        cache_path = os.path.join(root, f)
-                        if cache_path == self.model_path:
-                            return  # 已经是目标路径
-                        try:
-                            os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
-                            shutil.copy2(cache_path, self.model_path)
-                            logger.info(f"已缓存模型到: {self.model_path}")
-                        except Exception as e:
-                            logger.warning(f"缓存模型失败: {e}")
-                        return
-        except Exception:
-            pass  # 缓存失败不影响运行
+            src = self._find_downloaded_weights()
+            if not src:
+                logger.warning(
+                    "未能定位 ultralytics 下载的权重文件，模型仅存在于内存中，"
+                    "下次启动会重新下载。可手动把 %s 放入 models/ 目录",
+                    YOLO_MODEL_NAME,
+                )
+                return
+
+            try:
+                os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
+                shutil.copy2(src, self.model_path)
+            except Exception as e:
+                logger.warning(f"复制权重到 models/ 失败: {e}（不影响本次运行）")
+                return
+
+            if os.path.exists(self.model_path) and os.path.getsize(self.model_path) > 1000:
+                # 文件确实落盘，self.model_path 保持指向它（= 磁盘上真实存在的路径）
+                logger.info(f"已缓存模型到: {self.model_path} (来源: {src})")
+            else:
+                logger.warning(f"复制完成但目标文件不可用: {self.model_path}")
+        except Exception as e:
+            logger.warning(f"缓存模型异常: {e}")  # 缓存失败不影响运行
 
     def detect(self, frame: np.ndarray) -> list:
         """
